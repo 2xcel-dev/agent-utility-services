@@ -158,6 +158,78 @@ app.use((err, req, res, next) => {
     });
 });
 
+
+// ==========================================
+// OpenAPI Specification Endpoint
+// ==========================================
+const openApiSpec = {
+  openapi: "3.0.3",
+  info: {
+    title: "Agent Utility Services (AUS) API",
+    version: "1.0.0",
+    description: "Hardened micro-utility gateway for autonomous AI agents settled in Base USDC using x402."
+  },
+  servers: [{ url: "https://aus.2xcel.net" }],
+  paths: {
+    "/health": {
+      get: {
+        summary: "Service Health Check",
+        responses: {
+          "200": { description: "Service is online and operational." }
+        }
+      }
+    },
+    "/v1/schema-sanitizer": {
+      post: {
+        summary: "JSON Schema Sanitizer ($0.002 USDC)",
+        description: "Validates, normalizes, and sanitizes malformed JSON payloads.",
+        parameters: [
+          { name: "x-base-payment-proof", in: "header", required: true, schema: { type: "string" } },
+          { name: "x-transaction-uuid", in: "header", required: true, schema: { type: "string" } },
+          { name: "x-idempotency-key", in: "header", required: false, schema: { type: "string" } }
+        ],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object" } } }
+        },
+        responses: {
+          "200": { description: "Sanitized JSON schema returned." },
+          "402": { description: "Payment Required via x402 Base USDC." }
+        }
+      }
+    },
+    "/v1/financial-audit": {
+      post: {
+        summary: "Financial & On-Chain Audit ($0.010 USDC)",
+        parameters: [
+          { name: "x-base-payment-proof", in: "header", required: true, schema: { type: "string" } }
+        ],
+        responses: {
+          "200": { description: "Audit completed successfully." },
+          "402": { description: "Payment Required." }
+        }
+      }
+    },
+    "/v1/sandbox-execution": {
+      post: {
+        summary: "Ephemeral Sandbox Code Execution ($0.050 USDC)",
+        parameters: [
+          { name: "x-base-payment-proof", in: "header", required: true, schema: { type: "string" } }
+        ],
+        responses: {
+          "200": { description: "Execution result." },
+          "402": { description: "Payment Required." }
+        }
+      }
+    }
+  }
+};
+
+app.get("/openapi.json", (req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  res.json(openApiSpec);
+});
+
 app.listen(PORT, () => {
     console.log(`AUS server running on port ${PORT}`);
 });
