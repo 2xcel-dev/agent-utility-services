@@ -1,11 +1,24 @@
+require('dotenv').config();
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const { createPublicClient, http, parseUnits } = require('viem');
+const { base } = require('viem/chains');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
+// Base USDC mainnet contract address
+const BASE_USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
+// Base RPC Public Client
+const publicClient = createPublicClient({
+    chain: base,
+    transport: http(process.env.BASE_RPC_URL || 'https://mainnet.base.org')
+});
+
+// 1. API Gateway & Rate Limiting
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,
@@ -26,6 +39,7 @@ app.use('/v1/', globalLimiter);
 app.use('/v1/sandbox-execution', strictLimiter);
 app.use('/v1/claude-reason', strictLimiter);
 
+// 2. Idempotency & Transaction Verification
 const processedTransactions = new Set();
 
 const requireIdempotency = (req, res, next) => {
@@ -40,12 +54,13 @@ const requireIdempotency = (req, res, next) => {
     next();
 };
 
+// 3. x402 Payment Middleware with On-Chain Base Verification
 const requirex402Payment = (priceUSDC) => {
-    return (req, res, next) => {
-        const paymentProof = req.headers['x-base-payment-proof'];
+    return async (req, res, next) => {
+        const txHash = req.headers['x-base-payment-proof'];
         const transactionUUID = req.headers['x-transaction-uuid'];
 
-        if (!paymentProof) {
+        if (!txHash) {
             return res.status(402).json({
                 error: 'Payment Required',
                 protocol: 'x402',
@@ -60,10 +75,43 @@ const requirex402Payment = (priceUSDC) => {
             return res.status(400).json({ error: 'Bad Request: Missing x-transaction-uuid validation header.' });
         }
 
-        next();
+        try {
+            // Retrieve transaction receipt from Base RPC
+            const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+
+            if (!receipt || receipt.status !== 'success') {
+                return res.status(402).json({ error: 'Payment verification failed: Transaction pending, reverted, or not found on Base.' });
+            }
+
+            const requiredAmountAtomic = parseUnits(priceUSDC, 6);
+            const targetTreasury = (process.env.TREASURY_WALLET || '').toLowerCase();
+
+            // Verify ERC-20 Transfer log
+            const validTransfer = receipt.logs.some(log => {
+                const isUsdcContract = log.address.toLowerCase() === BASE_USDC_ADDRESS.toLowerCase();
+                if (!isUsdcContract) return false;
+
+                const toAddress = `0x${log.topics[2]?.slice(26)}`.toLowerCase();
+                const transferAmount = BigInt(log.data);
+
+                return toAddress === targetTreasury && transferAmount >= requiredAmountAtomic;
+            });
+
+            if (!validTransfer) {
+                return res.status(402).json({
+                    error: `Payment verification failed: No valid USDC transfer of at least ${priceUSDC} to ${process.env.TREASURY_WALLET} found in transaction.`
+                });
+            }
+
+            next();
+        } catch (error) {
+            console.error(`[ONCHAIN_VERIFY_ERROR] ${error.message}`);
+            return res.status(400).json({ error: 'Invalid transaction hash format or failed RPC lookup.' });
+        }
     };
 };
 
+// Utility Endpoints
 app.post('/v1/schema-sanitizer', requirex402Payment('0.002'), requireIdempotency, (req, res) => {
     res.json({ success: true, utility: 'schema-sanitizer', message: 'Schema validated and sanitized successfully.' });
 });
@@ -100,6 +148,7 @@ app.get('/health', (req, res) => {
     res.json({ status: 'online', service: 'Agent Utility Services (AUS)', protocol: 'x402' });
 });
 
+// 4. Secure Session & Error Handling
 app.use((err, req, res, next) => {
     console.error(`[INTERNAL_ERROR] ${err.stack}`);
     const statusCode = err.status || 500;
