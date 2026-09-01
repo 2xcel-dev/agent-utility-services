@@ -4,7 +4,8 @@
   "description": "Hardened x402 micro-utility gateway for autonomous agents settled in Base USDC",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:fleet": "node test/fleet.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.122.0",
