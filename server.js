@@ -4,7 +4,31 @@ const rateLimit = require('express-rate-limit');
 const Anthropic = require('@anthropic-ai/sdk');
 const crypto = require('crypto');
 const vm = require('vm');
+const { PostHog } = require('posthog-node');
 
+const posthog = process.env.POSTHOG_API_KEY
+  ? new PostHog(process.env.POSTHOG_API_KEY, {
+      host: process.env.POSTHOG_HOST || 'https://us.i.posthog.com',
+      flushAt: 1,
+      flushInterval: 0
+    })
+  : null;
+
+function trackAgentTelemetry(eventName, properties = {}) {
+  if (!posthog) return;
+  const distinctId = properties.agent_id || properties.client_ip || 'aus_fleet_runner';
+
+  posthog.capture({
+    distinctId: String(distinctId),
+    event: eventName,
+    properties: {
+      ...properties,
+      project_id: '589097',
+      environment: process.env.NODE_ENV || 'production',
+      timestamp: new Date().toISOString()
+    }
+  });
+}
 const app = express();
 const PORT = process.env.PORT || 3000;
 const PAYMENT_WALLET = process.env.BASE_WALLET || "0xFallbackWalletAddressHere";
@@ -29,7 +53,31 @@ const swarmLimiter = rateLimit({
   }
 });
 app.use(swarmLimiter);
+// PostHog Global Response Telemetry Interceptor
+app.use((req, res, next) => {
+  const start = Date.now();
+  const originalEnd = res.end;
 
+  res.end = function (...args) {
+    if (req.path.startsWith('/tools/')) {
+      const durationMs = Date.now() - start;
+      const toolName = req.path.replace('/tools/', '');
+      const agentId = req.headers['x-agent-id'] || req.body?.agent_id || 'anonymous_agent';
+
+      trackAgentTelemetry('tool_request_completed', {
+        tool: toolName,
+        agent_id: agentId,
+        status_code: res.statusCode,
+        duration_ms: durationMs,
+        paid: !!req.headers['x-payment-receipt'],
+        client_ip: req.ip
+      });
+    }
+    return originalEnd.apply(this, args);
+  };
+
+  next();
+});
 // 3. In-Memory Spent Receipt Cache (Replay Attack Defense)
 const spentReceipts = new Set();
 
