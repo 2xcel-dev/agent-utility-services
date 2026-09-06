@@ -1,0 +1,6 @@
+﻿version: '1.0'
+startCommand:
+  type: stdio
+  command: node
+  args:
+    - dist/index.js
