@@ -1,0 +1,98 @@
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { PostHog } from 'posthog-node';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const ADMIN_KEY = process.env.AUS_ADMIN_KEY || "";
+const AUS_BASE_URL = process.env.AUS_BASE_URL || "https://aus.2xcel.net";
+const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY || "";
+
+let posthog = null;
+if (POSTHOG_API_KEY) {
+    posthog = new PostHog(POSTHOG_API_KEY, { host: 'https://app.posthog.com' });
+}
+
+const registry = {
+    "schema-sanitizer": { cost: 0.002, type: "remote", route: "/tools/schema-sanitizer" },
+    "financial-audit": { cost: 0.010, type: "remote", route: "/tools/financial-audit" },
+    "geospatial-verifier": { cost: 0.020, type: "local", file: "geospatial-verifier.json" },
+    "sandbox-execution": { cost: 0.050, type: "local", file: "sandbox-execution.json" },
+    "claude-reason": { cost: 0.050, type: "remote", route: "/tools/claude-reason" },
+    "verification-oracle": { cost: 0.100, type: "remote", route: "/tools/verification-oracle" },
+    "media-transcoder": { cost: 0.150, type: "local", file: "media-transcoder.json" },
+    "agentic-audit": { cost: 0.250, type: "local", file: "agentic-audit.json" }
+};
+
+Object.entries(registry).forEach(([name, meta]) => {
+    app.post(`/v1/${name}`, async (req, res) => {
+        try {
+            let responseData;
+            if (meta.type === "local") {
+                const filePath = path.join(__dirname, meta.file);
+                const schema = fs.existsSync(filePath) 
+                    ? JSON.parse(fs.readFileSync(filePath, 'utf8')) 
+                    : { error: "Schema file not found" };
+
+                responseData = {
+                    status: "success",
+                    agent: name,
+                    costPerCall: meta.cost,
+                    schema,
+                    payloadReceived: req.body
+                };
+            } else {
+                const headers = { "Content-Type": "application/json" };
+                if (ADMIN_KEY) headers["x-admin-key"] = ADMIN_KEY;
+
+                const response = await fetch(`${AUS_BASE_URL}${meta.route}`, {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify(req.body)
+                });
+                const data = await response.json();
+                responseData = {
+                    status: "success",
+                    utility: name,
+                    costPerCall: meta.cost,
+                    result: data
+                };
+            }
+
+            if (posthog) {
+                posthog.capture({
+                    distinctId: req.headers['x-api-user'] || 'aus-gateway-client',
+                    event: 'agent_utility_executed',
+                    properties: {
+                        agent_name: name,
+                        cost: meta.cost,
+                        execution_type: meta.type || 'remote'
+                    }
+                });
+            }
+
+            return res.json(responseData);
+        } catch (error) {
+            res.status(500).json({ status: "error", message: error.message });
+        }
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: "healthy", 
+        activeEndpoints: Object.keys(registry).length,
+        endpoints: Object.keys(registry)
+    });
+});
+
+app.listen(PORT, () => {
+    console.log(`AUS Gateway running on port ${PORT} with all 8 agents indexed and PostHog connected.`);
+});
